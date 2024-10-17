@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>LuaWebTerminal-5.4.7</title>
+    <style>
+        body {
+            font-family: monospace;
+            background-color: #000000;
+            color: rgb(255, 255, 255);
+            padding: 20px;
+        }
+
+        .cmd-line {
+            display: flex;
+            font: 1em sans-serif;
+        }
+
+        .cmd-line>span {
+            margin-right: 5px;
+        }
+
+        .cmd-input {
+            flex: 1;
+            border: none;
+            background: none;
+            color: inherit;
+            font: inherit;
+            outline: none;
+            white-space: pre;
+        }
+
+        .cmd-warn {
+            color: #ffff00;
+        }
+
+        .cmd-success {
+            color: #00ff00;
+        }
+
+        .cmd-error {
+            color: #ff0000;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="cmd-container">
+        <div class="cmd-line">
+            <span>欢迎使用LuaWebTerminal，本终端将借助WASM技术由浏览器运行Lua5.4.7（为确保远古浏览器可以使用，WASM并非由浏览器执行而是JS解释执行）。</span>
+        </div>
+        <div class="cmd-line">
+            <span>LuaWebTerminal支持多行输入，只需Shift+Enter即可换行，支持按上下键回溯输入内容。</span>
+        </div>
+        <div class="cmd-line">
+            <span id="pretext"></span>
+        </div>
+        <div class="cmd-line">
+            <span>></span>
+            <div class="cmd-input" contenteditable="true"></div>
+        </div>
+    </div>
+    <script>
+        let datetime = new Date();
+        let year = datetime.getFullYear();
+        let month = datetime.getMonth() + 1;
+        let day = datetime.getDate();
+        let hour = datetime.getHours();
+        let minute = datetime.getMinutes();
+        let second = datetime.getSeconds();
+        document.getElementById('pretext').innerText = "本次启动于" + year + "-" + month + "-" + day + " " + hour + ":" + minute + ":" + second;
+        let inputs = [];
+        let lastinput = "";
+        let arrowidx = -1;
+        let lastnewinput = document.querySelector('.cmd-input');
+        function wraprawstr() {
+            lastnewinput.addEventListener('paste', (e) => {
+                //不带格式的粘贴
+                e.preventDefault();
+                const text = e.clipboardData.getData('text/plain');
+                document.execCommand('insertText', false, text);
+            });
+        }
+        wraprawstr();
+        const cmdContainer = document.getElementById('cmd-container');
+        function setCaretAtEnd(elem) {
+            const range = document.createRange();
+            const sel = window.getSelection();
+            range.selectNodeContents(elem);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            elem.focus();
+        }
+        cmdContainer.addEventListener('keydown', (e) => {
+            if (e.target.classList.contains('cmd-input')) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const inputLine = e.target.innerText;
+                    executeCommand(inputLine);
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (inputs.length > 0) {
+                        if (arrowidx == -1) {
+                            lastinput = e.target.innerText || "";
+                            arrowidx = inputs.length;
+                        }
+                        if (arrowidx == 0) { arrowidx = 1; }
+                        arrowidx = arrowidx - 1;
+                        e.target.innerText = inputs[arrowidx];
+                        setCaretAtEnd(e.target);
+                    }
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (arrowidx != -1 && inputs.length > 0) {
+                        if (arrowidx == inputs.length - 1) {
+                            e.target.innerText = lastinput;
+                            arrowidx = -1;
+                        } else {
+                            arrowidx = arrowidx + 1;
+                            e.target.innerText = inputs[arrowidx];
+                        }
+                        setCaretAtEnd(e.target);
+                    }
+                }
+
+
+            }
+        });
+        lastnewinput.focus();
+
+        document.addEventListener('click', (e) => {
+            lastnewinput.focus();
+        });
+        let statusStore = 0;
+        let lastOutput = null;
+        function cmdprint(data) {
+            const { level, args } = data;
+            const text = args.join(' ');
+            if (statusStore > 0 && lastOutput != null) {
+                //说明是连续打印，在上一个输出里追加
+                lastOutput.innerHTML += "\n" + text;
+                return;
+            }
+            statusStore++;
+            const outputLine = document.createElement('div');
+            outputLine.classList.add('cmd-line');
+            switch (level) {
+                case "error":
+                    console.error(text);
+                    outputLine.innerHTML = '<div class="cmd-input cmd-error">' + text + '</div>';
+                    break;
+                case "success":
+                default:
+                    console.log(text);
+                    outputLine.innerHTML = '<div class="cmd-input">' + text + '</div>';
+                    break;
+            }
+            cmdContainer.appendChild(outputLine);
+            lastOutput = outputLine.getElementsByClassName('cmd-input')[0];
+            const newCmdLine = document.createElement('div');
+            newCmdLine.classList.add('cmd-line');
+            newCmdLine.innerHTML = '<span>></span><div class="cmd-input" contenteditable="true"></div>';
+            cmdContainer.appendChild(newCmdLine);
+            lastnewinput = newCmdLine.querySelector('.cmd-input');
+            lastnewinput.focus();
+            lastinput = "";
+            arrowidx = -1;
+            wraprawstr();
+        };
+        let L = null;
+        function executeCommand(inputLine) {
+            statusStore = 0;
+            lastOutput = null;
+            inputs.push(inputLine);
+            const currentInput = document.querySelector('.cmd-input');
+            currentInput.contentEditable = 'false';
+            const loadResult = Module.ccall('luaL_loadstring', 'number', ['number', 'string'], [L, inputLine]);
+            if (loadResult !== 0) {
+                const errorMsg = Module.ccall('lua_tolstring', 'string', ['number', 'number'], [L, -1]);
+                cmdprint({ level: "error", args: [errorMsg] });
+                Module.ccall('lua_settop', 'number', ['number', 'number'], [L, 0]);
+                // Module.ccall('lua_close', 'number', ['number'], [L]);
+                return;
+            }
+            const callResult = Module.ccall('lua_pcallk', 'number', ['number', 'number', 'number', 'number', 'number'], [L, 0, -1, 0, null]);
+            if (callResult !== 0) {
+                const errorMsg = Module.ccall('lua_tolstring', 'string', ['number', 'number'], [L, -1]);
+                cmdprint({ level: "error", args: [errorMsg] });
+                Module.ccall('lua_settop', 'number', ['number', 'number'], [L, 0]);
+                // Module.ccall('lua_close', 'number', ['number'], [L]);
+                return;
+            }
+            // Module.ccall('lua_close', 'number', ['number'], [L]);
+            if (statusStore == 0) {
+                const newCmdLine = document.createElement('div');
+                newCmdLine.classList.add('cmd-line');
+                newCmdLine.innerHTML = '<span>></span><div class="cmd-input" contenteditable="true"></div>';
+                cmdContainer.appendChild(newCmdLine);
+                lastnewinput = newCmdLine.querySelector('.cmd-input');
+                lastnewinput.focus();
+                lastinput = "";
+                arrowidx = -1;
+                wraprawstr();
+            }
+            Module.ccall('lua_settop', 'number', ['number', 'number'], [L, 0]);
+        }
+        var Module = {
+            print: function (...args) {
+                cmdprint({ level: "success", args });
+            },
+            printErr: function (...args) {
+                cmdprint({ level: "error", args });
+            },
+            onRuntimeInitialized: function () {
+                L = self.ccall('luaL_newstate', 'number', [], []); // 创建 Lua 状态
+                self.ccall('luaL_openlibs', 'number', ['number'], [L]); // 打开标准库
+            }
+        };
+    </script>
+    {{{ SCRIPT }}}
+</body>
+
+</html>
